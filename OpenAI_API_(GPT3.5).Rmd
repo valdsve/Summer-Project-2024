@@ -1,0 +1,42 @@
+---
+title: "OpenAI API (GPT3.5)"
+author: "Valdimar"
+date: "2024-02-19"
+output:
+  pdf_document: default
+  html_document: default
+---
+Lets create an OpenAI API to help us filter based on descritpion for the series.
+
+```{r}
+library(httr)
+```
+
+```{r}
+chat<- function(message){
+  user_message<-list(list(role="user", content = message))
+  base_url<-"https://api.openai.com/v1"
+  api_key<-"Put you API key here"
+  body<-list(model="gpt-3.5-turbo-0125",
+           messages= user_message)
+req<-request(base_url)
+resp<-
+  req %>%
+  req_url_path_append("chat/completions")%>%
+  req_auth_bearer_token(token = api_key)%>%
+  req_headers("Content-Type"="application/json")%>%
+  req_user_agent("valdsve")%>%
+  req_body_json(body)%>%
+  #allows for 4 retries if our query does not work
+  req_retry(max_tries = 4)%>%
+  req_throttle(rate=15)%>%
+  req_perform()
+  
+openai_chat_response<-resp %>% resp_body_json(simplifyVector = TRUE)  
+ 
+openai_chat_response$choices$message$content
+}
+```
+
+
+

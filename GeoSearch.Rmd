@@ -1,0 +1,1810 @@
+---
+title: "GeoSearch"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load in the packages
+```{r}
+library("GEOsearch")
+library("GEOquery")
+```
+
+We will be using our data set created from SGs_list_and_IRES_list
+```{r}
+# To find aliases we will be using the package org.Hs.eg.db from BioConductor
+
+# Load the package
+library(org.Hs.eg.db)
+
+# Initialize an empty list to store results
+Terms <- list()
+Errors <- list()
+
+
+# Iterate over the genes
+for (i in Genes) {
+  tryCatch({
+    # Fetch gene aliases using org.Hs.eg.db
+    Terms[[i]] <- select(org.Hs.eg.db, keys = i, keytype = "SYMBOL", columns = "ALIAS")
+  }, error = function(e) {
+    cat("Error for gene:", i, "\n")
+    # Append the error gene to the Errors list
+    Errors <<- c(Errors, i)
+  })
+}
+
+```
+
+
+Now let's combine our errors and terms
+```{r}
+# Initialize an empty vector to store the combined aliases
+combined_aliases <- c()
+
+# Iterate over the Terms list
+for (i in Terms) {
+  if (!is.null(i) && "ALIAS" %in% colnames(i)) {
+    combined_aliases <- c(combined_aliases, i$ALIAS)
+  }
+}
+
+# Convert the combined aliases vector to a dataframe
+Combined_list_df <- data.frame(Alias = combined_aliases)
+
+# Print the combined dataframe
+print(Combined_list_df)
+
+# Convert Errors list to a single vector
+errors_vector <- unlist(Errors)
+
+# Convert the errors vector to a dataframe
+Errors_df <- data.frame(Alias = errors_vector)
+
+# Combine the two dataframes
+Combined_list_df <- rbind(Combined_list_df, Errors_df)
+
+# Print the final combined dataframe
+print(Combined_list_df)
+```
+
+
+```{r}
+dat<- unique(Combined_list_df)
+dat30<-dat$Alias[1:30]
+```
+
+Now we can search for all RNA-seq datasets from GEO using our genes and their aliases using the GEOSearchTerm() function.
+
+```{r}
+library("GEOsearch")
+
+# Initialize an empty list to store results
+Search <- list()
+Err_war_geo<-list()
+
+# Iterate over Terms using GeoSearchTerm function. The function finds all data sets for our genes using all aliases. We need to add RNA-seq in the input to get RNA-seq data sets. Also, we will add a warning and an error function to handle possible errors and warnings that tend to happen to handful of genes.
+for (i in Combined_list_df$Alias) {
+   
+    tryCatch(
+      expr = {
+        Search[[i]] <- GEOSearchTerm(paste(i,"RNA-seq"))
+      },
+      warning = function(w) {
+        # Handle the warning, or choose to ignore it
+        cat("Warning for value:", i, " - ", w$message, "\n")
+        Err_war_geo<<- c(Err_war_geo, i)
+
+      },
+      error = function(e) {
+        # Handle the error if needed
+        cat("Error for value:", i, " - ", e$message, "\n")
+        Err_war_geo<<- c(Err_war_geo, i)
+      },
+      finally = {
+        # This block will be executed regardless of success or failure
+      }
+    )
+  }
+
+
+```
+
+
+
+Now let's do some filtering. Let's only keep human and mice series
+```{r}
+library(dplyr)
+#clear previous merged_search list
+merged_search<-NULL
+# Merge all data frames into a single data frame
+merged_search <- bind_rows(Search)
+
+
+which(duplicated(merged_search$Series))
+```
+
+THIS CODE SNIPPET IS UNNECESSARY (if we do not want to inspect our merged_search further)
+```{r}
+# All the Term names
+Term_names <- unique(merged_search$Term)
+
+#Counts all instances of data sets for genes that contain homo sapiens, mus musculus or with other organisms
+Terms_Organism <- merged_search %>% 
+  filter(grepl("Homo sapiens|Mus musculus", Organism)) %>%
+  group_by(Term, Organism) %>%
+  summarise(count = n())
+
+# Counts all that do not contain any Homo sapiens or mus musculus
+Terms_Organism_Other <- merged_search %>% 
+  filter(!grepl("Homo sapiens|Mus musculus", Organism)) %>%
+  group_by(Term, Organism) %>%
+  summarise(count = n())
+
+
+# Create an empty list to store filtered data frames
+Search_filter <- list()
+
+# Iterate over each data frame in the Search list
+for (i in seq_along(Search)) {
+  # Filter each data frame for rows containing "Homo sapiens" or "Mus musculus"
+  filtered_df <- filter(Search[[i]], grepl("Homo sapiens|Mus musculus", Search[[i]]$Organism))
+  
+  # Assign the filtered data frame back to the list
+  Search_filter[[i]] <- filtered_df
+  
+  # Assign the name of the filtered data frame
+  names(Search_filter)[i] <- names(Search)[i]
+}
+```
+
+
+Now we can filter based on various keywords that capture knock down or knock out experiments in some ways
+```{r}
+# Loop through each title in the merged_search$Title column
+# Create an empty dataframe to store the filtered rows
+filtered_ms <- data.frame()
+
+# Loop through each title in the merged_search$Title column
+for (i in merged_search$Description) {
+  # Check if the description contains keywords that have to do with KD or KO, use ingore.case = TRUE since we do not care about case sensitivity
+  if (grepl("knock down|knock out|KD|KO|siRNA|shRNA|RNAi|knock-down|knock-out|knockdown|knockout|crispr", i, ignore.case = TRUE)) {
+    # Append the row where the condition is true to the filtered dataframe
+    filtered_ms <- rbind(filtered_ms, merged_search[merged_search$Description == i, ])
+  }
+}
+
+```
+
+
+```{r}
+#only include human and mice samples:
+filtered_ms_human_mice <- filtered_ms %>%
+  filter(grepl("Homo sapiens|Mus musculus", Organism))
+
+# How many genes are we left with after this filtering process?
+unique_values <- unique(filtered_ms_human_mice$Term)
+num_different_values <- length(unique_values)
+
+# Print the number of different values
+print(num_different_values)
+
+
+any(duplicated(filtered_ms_human_mice))
+
+# Identify duplicate rows based on the "Series" column
+duplicated_rows <- duplicated(filtered_ms_human_mice$Series) | duplicated(filtered_ms_human_mice$Series, fromLast = TRUE)
+
+# Subset the dataframe to retain only non-duplicate rows
+filtered_ms_human_mice_2 <- filtered_ms_human_mice[!duplicated_rows, ]
+
+
+
+```
+
+If we want we can make a csv file
+```{r}
+# Write the merged data frame to a CSV file
+write.csv(filtered_ms_human_mice, file = "search_geosearch_summer.csv", row.names = FALSE)
+```
+
+
+1 Filter based on sample names
+2 Use AI to go through all possible FALSE negatives
+
+Now let's filter by using "Characteristics" from the samples, SampleDetail gives us access to the "Characteristics" of our samples.
+
+```{r}
+# Initialize lists to store sample details and warnings
+sample_detail <- list()
+warnings_list <- list()
+
+for (i in 1:nrow(filtered_ms_human_mice)) {
+  # Extract the current series, term, and description
+  series <- filtered_ms_human_mice$Series[i]
+  term <- filtered_ms_human_mice$Term[i]
+  description <- filtered_ms_human_mice$Description[i]
+  
+  # Try to obtain SampleDetail for the current series
+  tryCatch({
+    detail <- SampleDetail(series)
+    detail$Gene <- term
+    detail$Background <- description
+    
+    # Append the detail list to sample_detail
+    sample_detail[[length(sample_detail) + 1L]] <- detail
+  }, warning = function(w) {
+    # Store warnings in the warnings_list
+    warnings_list[[length(warnings_list) + 1L]] <- list(series = series, term = term, description = description, warning = w)
+  }, error = function(e) {
+    # Store errors in the warnings_list
+    warnings_list[[length(warnings_list) + 1L]] <- list(series = series, term = term, description = description, error = e)
+  })
+}
+
+# Convert warnings_list to a data frame for easier viewing
+warnings_df <- do.call(rbind, lapply(warnings_list, as.data.frame))
+
+```
+note: the code above does not manage to store errors and warnings. However it does complete a run and store results.
+
+Instead:
+
+Let's find which series the code above did not return any results for
+```{r}
+Total_series<-filtered_ms_human_mice$Series
+
+# Initialize a list to store the total series from samples
+Total_series_fromsample <- list()
+
+# Loop through each detail in the sample_detail list
+for (i in seq_along(sample_detail)) {
+  # Extract the Experiment value and store it in the list
+  Total_series_fromsample[[i]] <- sample_detail[[i]]$Experiment[1]
+}
+
+# Convert the list to a vector
+Total_series_fromsample_vector <- as.vector(unlist(Total_series_fromsample))
+
+# Series that did not return any results
+Series_left<- setdiff(Total_series, Total_series_fromsample_vector)
+
+# Is Total_series_fromsample_vector a subset of Total_series?
+is_subset <- all(Total_series_fromsample_vector %in% Total_series)
+
+
+# Check for duplicates
+unique_Total_series <- unique(Total_series)
+num_unique_Total_series <- length(unique_Total_series)
+unique_Total_series_fromsample <- unique(Total_series_fromsample_vector)
+num_unique_Total_series_fromsample <- length(unique_Total_series_fromsample)
+```
+
+
+The only series differnce is GSE99305 but there is still differnce in length. This must mean that there are differnces in multiples of some series. But which?
+```{r}
+# Count occurrences in Total_series
+Total_series_counts <- table(Total_series)
+
+# Count occurrences in Total_series_fromsample_vector
+Total_series_fromsample_vector_counts <- table(Total_series_fromsample_vector)
+
+# Create a data frame to compare counts
+comparison_df <- data.frame(
+  Series = names(Total_series_counts),
+  Count_Total_series = as.integer(Total_series_counts),
+  Count_Total_series_fromsample_vector = as.integer(Total_series_fromsample_vector_counts[names(Total_series_counts)])
+)
+
+# Replace NA with 0 in Count_Total_series_fromsample_vector (if any)
+comparison_df$Count_Total_series_fromsample_vector[is.na(comparison_df$Count_Total_series_fromsample_vector)] <- 0
+
+# Find series that appear more often in Total_series
+more_frequent_series <- comparison_df[comparison_df$Count_Total_series > comparison_df$Count_Total_series_fromsample_vector, ]
+
+# Which series
+series_missing_data <- more_frequent_series$Series
+
+# Filter rows in filtered_ms_human_mice where Series is in series_missing_data
+series_Total_series <- filtered_ms_human_mice[filtered_ms_human_mice$Series %in% series_missing_data, ]
+
+# Do the same but for sample_detail
+# Combine all data frames in sample_detail into a single data frame
+sample_detail_df <- bind_rows(sample_detail)
+
+series_Total_series_missing <- sample_detail_df[sample_detail_df$Experiment %in% series_missing_data, ]
+
+```
+
+```{r}
+# Assuming series_Total_series is your data frame
+unique_series <- unique(series_Total_series$Series)
+
+# Initialize an empty list to store terms for each series with correct names
+terms_list <- lapply(unique_series, function(series) {
+  series_terms <- unique(series_Total_series$Term[series_Total_series$Series == series])
+  names(series_terms) <- NULL  # Remove names to avoid NA values
+  return(series_terms)
+})
+
+# Set names for the list elements to match series IDs
+names(terms_list) <- unique_series
+```
+
+
+```{r}
+# Assuming series_Total_series is your data frame
+unique_series_2 <- unique(series_Total_series_missing$Experiment)
+
+# Initialize an empty list to store terms for each series with correct names
+terms_list_2 <- lapply(unique_series_2, function(series) {
+  series_terms <- unique(series_Total_series_missing $Gene[series_Total_series_missing $Experiment == series])
+  names(series_terms) <- NULL  # Remove names to avoid NA values
+  return(series_terms)
+})
+
+# Set names for the list elements to match series IDs
+names(terms_list_2) <- unique_series_2
+
+```
+
+```{r}
+# Initialize an empty list to store the differences
+differences_list <- list()
+
+# Iterate through each series ID (name) in terms_list
+for (name in names(terms_list)) {
+  # Extract terms from terms_list and terms_list_2 for the current series ID
+  terms_1 <- terms_list[[name]]
+  terms_2 <- terms_list_2[[name]]
+  
+  # Find terms in terms_1 that are not in terms_2
+  terms_diff <- setdiff(terms_1, terms_2)
+  
+  # Store the differences in the differences_list with the series ID as the name
+  differences_list[[name]] <- terms_diff
+}
+```
+
+
+```{r}
+# Initialize a counter to keep track of duplicate names
+counter <- 1
+
+# Loop through the indices of sample_detail
+for (i in seq_along(sample_detail)) {
+  # Get the series value at index i
+  series_value <- filtered_ms_human_mice$Series[i]
+  
+  # Check if the series_value is a duplicate
+  if (series_value %in% names(sample_detail )) {
+    # Append a counter to the series_value to make it unique
+    new_name <- paste0(series_value, "_", counter)
+    
+    # Increment the counter for future duplicates
+    counter <- counter + 1
+  } else {
+    # If series_value is not a duplicate, use it as is
+    new_name <- series_value
+  
+  }
+  
+  # Assign the new name to the corresponding element in sample_detail
+  names(sample_detail )[i] <- new_name
+}
+
+# Create an empty list to store responses
+responses_sample_characteristic<- list()
+
+# Loop through each gene description
+for (i in seq_along(sample_detail)) {
+
+  title <- sample_detail[[i]][["Characteristic"]]
+  gene <- gsub(" RNA-seq", "", filtered_ms_human_mice$Term[i])
+  # Create a list to store responses for the current gene
+  sample_responses <- list()
+  
+  # Loop to collect multiple responses
+  for (j in seq_along(title)) {  # Collecting responses for each title
+    answer <- grepl(gene, title[[j]], ignore.case = TRUE)
+    
+    # Store the response in the list
+    sample_responses[[j]] <- answer
+  }
+  
+  # Store the list of responses for the current gene in the main responses list
+  responses_sample_characteristic[[i]] <- sample_responses
+}
+
+# Rename the indices based on the charactristic values
+for (i in seq_along(responses_sample_characteristic)) {
+  series_value <- names(sample_detail)[i]
+  names(responses_sample_characteristic)[i] <- series_value
+}
+
+sample_detail_filtered <- sample_detail
+
+# Initialize valid_samples list
+valid_samples <- list()
+
+# Loop through sample characteristics
+for (i in seq_along(responses_sample_characteristic)) {
+  # Check if any element in the characteristic list is TRUE
+  is_valid_sample <- any(unlist(responses_sample_characteristic[[i]]))
+  
+  # Keep element if there's any TRUE value
+  if (is_valid_sample) {
+    # Get the name of the current sample
+    sample_name <- names(sample_detail)[i]
+    
+    # Add the sample to valid_samples
+    valid_samples[[length(valid_samples) + 1L]] <- sample_detail[[i]]
+    
+    # Optionally, you can assign the name to the new entry if you want,
+    # although it's not necessary since the name is retained from sample_detail
+    names(valid_samples)[length(valid_samples)] <- sample_name
+  }
+}
+
+# Assign valid_samples to sample_detail_filtered
+sample_detail_filtered <- valid_samples
+
+```
+
+Let's filter in using AI, all that came out as FALSE in responses_sample_characteristic. This hopefully reduces the amount of FALSE negatives. We will be using GPT4 and GPT3.5 models. 
+```{r}
+# Initialize valid_samples list
+valid_samples <- list()
+
+for (i in seq_along(responses_sample_characteristic)){
+  # Check if all element in the characteristic list is FALSE
+  is_valid_sample <- all(!unlist(responses_sample_characteristic[[i]]))
+   # Keep element if all values are FALSE
+  if (is_valid_sample){
+     # Get the name of the current sample
+    sample_name <- names(sample_detail)[i]
+    
+    # Add the sample to valid_samples
+    valid_samples[[length(valid_samples) + 1L]] <- sample_detail[[i]]
+    
+    # Optionally, you can assign the name to the new entry if you want,
+    # although it's not necessary since the name is retained from sample_detail
+    names(valid_samples)[length(valid_samples)] <- sample_name
+  }
+}
+
+# Assign valid_samples to sample_detail_FALSE
+sample_detail_FALSE<- valid_samples
+```
+
+First lets use GPT3.5
+```{r}
+# Create an empty list to store responses
+GPT3.5_Description_responses_FALSE <- list()
+
+# Loop through each gene description
+for (i in seq_along(sample_detail_FALSE)) {
+  gene <- gsub(" RNA-seq", "", sample_detail_FALSE[[i]]$Gene[1])
+  description <- sample_detail_FALSE[[i]]$Background[1]
+  
+  # Create a list to store responses for the current gene
+  gene_responses <- list()
+  
+  # Loop to collect multiple responses
+  #for (j in 1:20) {  # Collecting 20 responses for each gene (adjust as needed)
+    answer <- chat(paste("You are analyzing an RNA-seq dataset description. Please evaluate whether the gene of interest:", gene, "has specifically been knocked down or knocked out based on the provided description.\n\nDescription:\n", description, "\n\nQuestion:\nBased on the provided description, has the gene of interest:", gene,"specifically been knocked down or knocked out? Please respond with TRUE if the gene has been mentioned being knocked down or knocked out, and FALSE otherwise. DO NOT provide an explanation"))
+    
+    # Store the response in the list
+    gene_responses[[j]] <- answer
+    
+     # Add a delay to stay within rate limits (20 requests per minute)
+    Sys.sleep(3.1)  # 3.1 seconds delay between each request for added safety
+    
+  #}
+  
+  # Store the list of responses for the current gene in the main responses list
+  GPT3.5_Description_responses_FALSE [[i]] <- gene_responses
+}
+```
+
+Then GPT4
+```{r}
+# Create an empty list to store responses
+GPT4_Description_responses_FALSE <- list()
+
+# Loop through each gene description
+for (i in seq_along(sample_detail_FALSE)) {
+  gene <- gsub(" RNA-seq", "", sample_detail_FALSE[[i]]$Gene[1])
+  description <- sample_detail_FALSE[[i]]$Background[1]
+  
+  # Create a list to store responses for the current gene
+  gene_responses <- list()
+  
+  # Loop to collect multiple responses
+  #for (j in 1:20) {  # Collecting 20 responses for each gene (adjust as needed)
+    answer <- chat4o(paste("You are analyzing an RNA-seq dataset description. Please evaluate whether the gene of interest:", gene, "has specifically been knocked down or knocked out based on the provided description.\n\nDescription:\n", description, "\n\nQuestion:\nBased on the provided description, has the gene of interest:", gene,"specifically been knocked down or knocked out? Please respond with TRUE if the gene has been mentioned being knocked down or knocked out, and FALSE otherwise. DO NOT provide an explanation"))
+    
+    # Store the response in the list
+    gene_responses[[j]] <- answer
+    
+     # Add a delay to stay within rate limits (20 requests per minute)
+    Sys.sleep(3.1)  # 3.1 seconds delay between each request for added safety
+    
+  #}
+  
+  # Store the list of responses for the current gene in the main responses list
+  GPT4_Description_responses_FALSE [[i]] <- gene_responses
+}
+```
+
+
+Now let's only keep the 12th element from each list since that is were the response is stored for some reason.
+```{r}
+
+GPT3.5<- lapply(GPT3.5_Description_responses_FALSE, function(x) x[[12]])
+
+GPT4 <- lapply(GPT4_Description_responses_FALSE, function(x) x[[12]])
+
+# Rename the indices based on the Series values
+for (i in seq_along(GPT3.5 )) {
+  series_value <- names(sample_detail_FALSE)[i]
+  names(GPT3.5)[i] <- series_value
+}
+
+# Rename the indices based on the Series values
+for (i in seq_along(GPT4 )) {
+  series_value <- names(sample_detail_FALSE)[i]
+  names(GPT4)[i] <- series_value
+}
+
+```
+
+Let's compare GPT3.5 and GPT4
+```{r}
+# Function to compare lists and create a data frame of differences
+compare_and_create_table <- function(list1, list2) {
+  differences <- data.frame(
+    Name = character(),
+    GPT3.5 = character(),
+    GPT4 = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (name in names(list1)) {
+    if (list1[[name]] != list2[[name]]) {
+      differences <- rbind(differences, data.frame(
+        Name = name,
+        GPT3.5 = list1[[name]],
+        GPT4 = list2[[name]]
+      ))
+    }
+  }
+  differences
+}
+
+# Create the data frame of differences
+diff_table <- compare_and_create_table(GPT3.5, GPT4)
+```
+
+
+
+```{r}
+# Function to compare lists and keep "TRUE" for differences
+compare_and_update <- function(list1, list2) {
+  updated_list <- list1
+  for (name in names(list1)) {
+    if (list1[[name]] != list2[[name]]) {
+      updated_list[[name]] <- "TRUE"
+    } else {
+      updated_list[[name]] <- list1[[name]]
+    }
+  }
+  updated_list
+}
+
+# Create the updated list
+updated_GPT <- compare_and_update(GPT3.5, GPT4)
+
+
+```
+
+
+Let's keep all TRUE response from updated_GPT
+```{r}
+
+# Filter to keep only TRUE values
+GPT_true <- Filter(function(x) x == TRUE, updated_GPT)
+
+```
+
+
+Get all the TRUE data from sample_detail_FALSE
+```{r}
+
+# Initialize an empty list to store the filtered results
+Series_TRUE_GPT <- list()
+
+# Loop through each name in GPT_true
+for (i in names(GPT_true)) {
+  # Check if the name exists in sample_detail_FALSE
+  if (i %in% names(sample_detail_FALSE)) {
+    # Add the corresponding value to Series_TRUE_GPT
+    Series_TRUE_GPT[[i]] <- sample_detail_FALSE[[i]]
+  }
+}
+```
+
+
+Let's now combine our two dataframes sample_detail_filtered and Series_TRUE_GPT
+```{r}
+Filtered_dataframe_combined <- c(sample_detail_filtered, Series_TRUE_GPT)
+
+```
+
+Let's make xlsx files to go over the series from each filtering step
+```{r}
+library(openxlsx)
+
+GSE_GPT<-names(Series_TRUE_GPT)
+
+df<- data.frame(GSE=GSE_GPT)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_GPT_summer.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE)
+
+GSE_sample<-names(sample_detail_filtered)
+
+df<- data.frame(GSE=GSE_sample)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_sample_summer.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE)
+
+```
+
+
+Let's count the number of genes
+```{r}
+# Initialize an empty vector to collect all gene names
+all_genes <- character()
+
+# Loop through each data frame in the list
+for (df in Filtered_dataframe_combined) {
+  # Extract the 'Gene' column and append to the vector
+  all_genes <- c(all_genes, df$Gene[1])
+}
+
+# Count occurrences of each unique gene
+gene_counts <- table(all_genes)
+
+# Convert the table to a data frame for better readability
+gene_counts_df <- as.data.frame(gene_counts)
+colnames(gene_counts_df) <- c("Gene", "Count")
+
+# Reorder the dataframe by 'Count' in descending order
+gene_counts_df <- gene_counts_df[order(-gene_counts_df$Count), ]
+
+
+
+```
+
+
+Let's reorder the Filtered_dataframe_combined list
+```{r}
+
+# Extract the sorted gene list based on counts
+sorted_genes <- gene_counts_df$Gene[order(-gene_counts_df$Count)]
+
+# Create a ranking for each gene
+gene_rank <- setNames(seq_along(sorted_genes), sorted_genes)
+
+# Reorder the dataframes in Filtered_dataframe_combined based on the counts in sorted_genes
+# Ensure Filtered_dataframe_combined is a named list where names are the dataframe names
+
+# Helper function to get the main gene from each dataframe
+get_main_gene <- function(df) {
+  # Assuming each dataframe has a column 'Gene' and we are interested in the first gene listed
+  unique(df$Gene)[1]
+}
+
+# Reorder the list
+reordered_list <- Filtered_dataframe_combined[order(sapply(Filtered_dataframe_combined, function(df) {
+  # Get the main gene from each dataframe
+  main_gene <- get_main_gene(df)
+  # Return the rank of the main gene (high rank = high count)
+  gene_rank[main_gene]
+}))]
+
+
+Filtered_dataframe_combined<-reordered_list
+
+```
+
+
+
+Now we prep our metadata using crawl_gsms from GEOfastaq package, this gives us all information on all samples within each series. More importantly it gives us the necessary information to construct necessary paths to later download in Elja. 
+```{r}
+#Now let's do this in bulk
+library("GEOfastq")
+srp_meta <- list()  # Initialize an empty list to store results
+
+# Loop through each list 
+for (i in seq_along(Filtered_dataframe_combined)) {
+  
+  # Get the name of the current series
+  sample_name <- names(Filtered_dataframe_combined)[i]
+  
+  # Get the gene in the current series
+  gene <- Filtered_dataframe_combined[[i]]$Gene[1]
+  
+  # Get the second index of the current list
+  index_value <- Filtered_dataframe_combined[[i]][[2]]
+  
+  # Apply crawl_gsms to the index value with error handling
+  result <- tryCatch({
+    crawl_gsms(index_value)
+  }, error = function(e) {
+    message(paste("Error occurred for sample:", sample_name, "Error message:", e$message))
+    return(NULL)  # Return NULL if error occurs
+  })
+  
+  if (!is.null(result) && nrow(result) > 0) {  # Proceed only if result is not NULL and not empty
+    result$gene <- gene  # Add 'gene' information to the result
+    
+    # Store the result in srp_meta with the name of the current list
+    srp_meta[[length(srp_meta) + 1L]] <- result
+    names(srp_meta)[length(srp_meta)] <- sample_name
+  } else {
+    message(paste("No data found for sample:", sample_name))
+  }
+}
+```
+
+```{r}
+srp_meta_clean<- srp_meta
+```
+
+Let's fix the names
+```{r}
+for (i in seq_along(srp_meta_clean)){
+  names(srp_meta_clean)[i] <- srp_meta_clean[[i]]$series_id[1]
+}
+```
+
+now let's only keep the unique series for given gene (no multiples)
+```{r}
+# Create an empty list to store unique dataframes
+unique_dfs <- list()
+
+# Create a set to track unique series_id and gene combinations
+unique_combinations <- c()
+
+# Loop through each dataframe in the list
+for (i in seq_along(srp_meta_clean)) {
+  df <- srp_meta_clean[[i]]
+  
+  # Get the series_id and gene from the dataframe
+  series_id <- df$series_id[1]
+  gene <- df$gene[1]
+  
+  # Create a unique key for the combination of series_id and gene
+  combination_key <- paste(series_id, gene, sep = "_")
+  
+  # Check if the combination key is unique
+  if (!combination_key %in% unique_combinations) {
+    # Add the combination key to the set of unique combinations
+    unique_combinations <- c(unique_combinations, combination_key)
+    
+    # Add the dataframe to the list of unique dataframes
+    unique_dfs[[length(unique_dfs) + 1]] <- df
+  }
+}
+
+# Optionally, set names for the unique_dfs list
+names(unique_dfs) <- sapply(unique_dfs, function(df) df$series_id[1])
+
+# unique_dfs now contains only the unique dataframes based on series_id and gene
+
+
+
+```
+
+now let's find prepare the rest
+
+```{r}
+target_name<-"GSE187008_1981"
+
+# Find the index of the dataframe with the given name
+index <- which(names(Filtered_dataframe_combined) == target_name)
+
+rest_of_filtered_data<- Filtered_dataframe_combined[index:length(Filtered_dataframe_combined)]
+
+```
+
+Fix the names
+```{r}
+
+for (i in seq_along(rest_of_filtered_data)){
+  names(rest_of_filtered_data)[i] <- rest_of_filtered_data[[i]]$Experiment[1]
+}
+```
+
+```{r}
+# Create an empty list to store unique dataframes
+unique_filtered_data <- list()
+
+# Create a set to track unique series_id and gene combinations
+unique_combinations <- c()
+
+# Loop through each dataframe in the list
+for (i in seq_along(rest_of_filtered_data)) {
+  df <- rest_of_filtered_data[[i]]
+  
+  # Get the series_id and gene from the dataframe
+  series_id <- df$Experiment[1]
+  gene <- df$Gene[1]
+  
+  # Create a unique key for the combination of series_id and gene
+  combination_key <- paste(series_id, gene, sep = "_")
+  
+  # Check if the combination key is unique
+  if (!combination_key %in% unique_combinations) {
+    # Add the combination key to the set of unique combinations
+    unique_combinations <- c(unique_combinations, combination_key)
+    
+    # Add the dataframe to the list of unique dataframes
+    unique_filtered_data[[length(unique_filtered_data) + 1]] <- df
+  }
+}
+
+# Optionally, set names for the unique_dfs list
+names(unique_filtered_data) <- sapply(unique_filtered_data, function(df) df$Experiment[1])
+
+# unique_dfs now contains only the unique dataframes based on series_id and gene
+
+```
+
+hvað hefur birst áður í unique_dfs
+```{r}
+unique_names<-unique(names(unique_filtered_data))
+
+
+subname_index <- which(names(unique_dfs) %in% unique_names)
+
+ # Subset the names directly without looping
+subname <- names(unique_dfs)[subname_index]
+
+```
+
+
+Hvaða gen eru það í unique_filtered_data sem þarf að bæta við í unique_dfs
+```{r}
+# Initialize an empty dataframe to store genes and their associated series
+genes_subname <- data.frame(Series = character(), Gene = character(), stringsAsFactors = FALSE)
+
+# Loop through the names in subname and extract genes
+for (name in subname) {
+  df <- unique_filtered_data[[name]]
+  
+  # Create a temporary dataframe to store the current dataframe's genes
+  temp_df <- data.frame(Series = df$Experiment[1], Gene = df$Gene[1], stringsAsFactors = FALSE)
+  
+  # Append the temporary dataframe to the main dataframe
+  genes_subname <- rbind(genes_subname, temp_df)
+}
+
+# Remove duplicate rows based on both Series and Gene columns
+unique_genes_subname <- unique(genes_subname)
+
+```
+
+Let's get all the preprocessed series and genes from unique_genes_subname into unique_dfs
+```{r}
+
+unique_dfs_mod<-unique_dfs
+
+# Loop through each row in copy_info
+for (i in 1:nrow(unique_genes_subname)) {
+  # Extract series_id and new gene value
+  series<- unique_genes_subname$Series[i]
+  gene <- unique_genes_subname$Gene[i]
+  
+  # Check if series_id exists in the original list
+  if (series %in% names(unique_dfs_mod)) {
+    # Create a copy of the dataframe
+    df_copy <- unique_dfs_mod[[series]]
+    
+    
+    # Modify the Gene column
+    df_copy$gene <- gene
+    
+    # Store the modified copy in the list
+    unique_dfs_mod[[series]] <- df_copy
+  } else {
+    warning(paste("Series ID", series_id, "not found in Filtered_dataframe_combined."))
+  }
+}
+
+```
+
+now add
+```{r}
+# Initialize a copy of unique_dfs
+unique_dfs_mod <- unique_dfs
+
+# Loop through each row in unique_genes_subname
+for (i in 1:nrow(unique_genes_subname)) {
+  # Extract series_id and new gene value
+  series <- unique_genes_subname$Series[i]
+  new_gene <- unique_genes_subname$Gene[i]
+  
+  # Check if series_id exists in the list of dataframes
+  if (series %in% names(unique_dfs_mod)) {
+    # Create a copy of the dataframe
+    df_copy <- unique_dfs_mod[[series]]
+    
+   
+    # Modify the Gene column
+    # Replace all values in the Gene column with new_gene
+    df_copy$gene <- new_gene
+   
+    
+    # Store the modified copy in the list
+    unique_dfs_mod<-append(unique_dfs_mod, list(series=df_copy))
+    names(unique_dfs_mod)[length(unique_dfs_mod)]<-series
+  } else {
+    warning(paste("Series ID", series, "not found in unique_dfs_mod."))
+  }
+}
+
+```
+
+perpare the rest
+```{r}
+
+# Check if set1 is a subset of set2
+is_subset <- all(names(unique_filtered_data) %in% names(rest_of_filtered_data))
+print(is_subset)  # Should print TRUE
+
+rest_to_run <- setdiff(names(unique_filtered_data), names(unique_dfs_mod))
+
+rest_to_run_df<-unique_filtered_data[names(unique_filtered_data) %in% rest_to_run]
+
+
+```
+
+
+
+```{r}
+#Now let's do this in bulk
+library("GEOfastq")
+srp_meta_rest <- list()  # Initialize an empty list to store results
+
+# Loop through each list 
+for (i in seq_along(rest_to_run_df)) {
+  
+  # Get the name of the current series
+  sample_name <- names(rest_to_run_df)[i]
+  
+  # Get the gene in the current series
+  gene <- rest_to_run_df[[i]]$Gene[1]
+  
+  # Get the second index of the current list
+  index_value <- rest_to_run_df[[i]][[2]]
+  
+  # Apply crawl_gsms to the index value with error handling
+  result <- tryCatch({
+    crawl_gsms(index_value)
+  }, error = function(e) {
+    message(paste("Error occurred for sample:", sample_name, "Error message:", e$message))
+    return(NULL)  # Return NULL if error occurs
+  })
+  
+  if (!is.null(result) && nrow(result) > 0) {  # Proceed only if result is not NULL and not empty
+    result$gene <- gene  # Add 'gene' information to the result
+    
+    # Store the result in srp_meta_rest with the name of the current list
+    srp_meta_rest[[length(srp_meta_rest) + 1L]] <- result
+    names(srp_meta_rest)[length(srp_meta_rest)] <- sample_name
+  } else {
+    message(paste("No data found for sample:", sample_name))
+  }
+}
+```
+
+combine all results from srp
+```{r}
+
+srp<-c(unique_dfs_mod, srp_meta_rest)
+```
+
+uniqueness from Filtered_data_frame
+```{r}
+
+# Create an empty list to store unique dataframes
+Filtered_data_unique <- list()
+
+# Create a set to track unique series_id and gene combinations
+unique_combinations <- c()
+
+# Loop through each dataframe in the list
+for (i in seq_along(Filtered_dataframe_combined)) {
+  df <- Filtered_dataframe_combined[[i]]
+  
+  # Get the series_id and gene from the dataframe
+  series_id <- df$Experiment[1]
+  gene <- df$Gene[1]
+  
+  # Create a unique key for the combination of series_id and gene
+  combination_key <- paste(series_id, gene, sep = "_")
+  
+  # Check if the combination key is unique
+  if (!combination_key %in% unique_combinations) {
+    # Add the combination key to the set of unique combinations
+    unique_combinations <- c(unique_combinations, combination_key)
+    
+    # Add the dataframe to the list of unique dataframes
+    Filtered_data_unique[[length(Filtered_data_unique) + 1]] <- df
+  }
+}
+
+# Optionally, set names for the unique_dfs list
+names(Filtered_data_unique) <- sapply(Filtered_data_unique, function(df) df$Experiment[1])
+
+```
+
+uniqnuess from sample_detail
+```{r}
+# Create an empty list to store unique dataframes
+sample_detail_unique <- list()
+
+# Create a set to track unique series_id and gene combinations
+unique_combinations <- c()
+
+# Loop through each dataframe in the list
+for (i in seq_along(sample_detail)) {
+  df <- sample_detail[[i]]
+  
+  # Get the series_id and gene from the dataframe
+  series_id <- df$Experiment[1]
+  gene <- df$Gene[1]
+  
+  # Create a unique key for the combination of series_id and gene
+  combination_key <- paste(series_id, gene, sep = "_")
+  
+  # Check if the combination key is unique
+  if (!combination_key %in% unique_combinations) {
+    # Add the combination key to the set of unique combinations
+    unique_combinations <- c(unique_combinations, combination_key)
+    
+    # Add the dataframe to the list of unique dataframes
+    sample_detail_unique[[length(sample_detail_unique) + 1]] <- df
+  }
+}
+
+# Optionally, set names for the unique_dfs list
+names(sample_detail_unique) <- sapply(sample_detail_unique, function(df) df$Experiment[1])
+
+
+
+
+```
+
+
+
+
+Update our GPT TRUE and FALSE comparison list (diff_table)
+```{r}
+library(dplyr)
+library(purrr)
+# Function to extract Gene[1] and Experiment[1] from a dataframe
+extract_data <- function(df) {
+  tibble(
+    Gene = df$Gene[1],
+    Experiment = df$Experiment[1]
+  )
+}
+
+# Create a dataframe with the names of the dataframes as row names and the extracted data
+result <- map_df(Series_TRUE_GPT, extract_data, .id = "DataFrameName")
+
+
+```
+
+```{r}
+
+srp_rename<-srp
+# Initialize a counter to keep track of duplicate names
+counter <- 1
+
+# Create a vector to store the new unique names
+unique_names <- character(length(srp_rename))
+
+# Loop through the indices of srp
+for (i in seq_along(srp_rename)) {
+  # Get the series value at index i
+  series_value <- names(srp_rename)[i]
+  
+  # Check if the series_value is already in the unique_names
+  if (series_value %in% unique_names) {
+    
+    # Append a counter to the series_value to make it unique
+    new_name <- paste0(series_value, "_", counter)
+    
+    # Increment the counter for future duplicates
+    counter <- counter + 1
+  } else {
+    # If series_value is not a duplicate, use it as is
+    new_name <- series_value
+  }
+  
+  # Store the new name in the unique_names vector
+  unique_names[i] <- new_name
+}
+
+# Assign the new unique names to the srp
+names(srp_rename) <- unique_names
+
+
+
+```
+
+lets add to the result dataframe of GPTs
+```{r}
+GPT_df<-result
+
+GPT_df$updatedframename <- NA
+
+for (i in seq_along(srp_rename)){
+  series<-srp_rename[[i]]$series_id[1]
+  gene<-srp_rename[[i]]$gene[1]
+  name<-names(srp_rename)[i]
+  
+    # Find matching rows in GPT_df
+  match_idx <- which(GPT_df$Gene == gene & GPT_df$Experiment == series)
+  
+  # Update the DataFrameName in GPT_df with the series value
+  if (length(match_idx) > 0) {
+    GPT_df$updatedframename[match_idx] <- name
+  
+  
+  }
+}  
+```
+
+```{r}
+# Perform a left join to add the updatedframename column to diff_table
+diff_table2 <- diff_table %>%
+  left_join(GPT_df, by = c("Name" = "DataFrameName")) %>%
+  select(Name, GPT3.5,GPT4, updatedframename)
+```
+
+
+Bæta saman og breyta nafni aftur og raða aftur genum saman ut fra tiðni
+
+
+
+```{r}
+# Now we want to filter out all data frames that are do not contain RNA-seq under "library_strategy". We wish to keep data frames that contain at least 4 instances of RNA-seq under library_strategy. This is because some samples might have been chip-seq and some RNA-seq and we need at least 4 RNA-seq to be able to use a series, 2 WT and 2 KO/KD
+
+# Create a copy of srp_meta
+srp_meta_RNAseq <- srp_rename
+
+# Create an empty vector to store the indices that meet the condition
+indices <- c()
+
+# Iterate over each element in srp_meta_test
+for (i in seq_along(srp_meta_RNAseq)) {
+  # Count the occurrences of "RNA-Seq" in the library_strategy column
+  count_rnaseq <- sum(srp_meta_RNAseq[[i]]$library_strategy == "RNA-Seq")
+  
+  # If at least 4 "RNA-Seq" are present, store the index
+  if (count_rnaseq >= 4) {
+    indices <- c(indices, i)
+  }
+}
+
+# Remove elements from srp_meta_test that do not meet the condition
+srp_meta_RNAseq <- srp_meta_RNAseq[indices]
+
+# Print the indices that meet the condition
+print(indices)
+```
+
+
+```{r}
+#Let's prepare our metadata list
+metadata<-srp_meta_RNAseq
+
+#We want to keep these values and remove rest
+selected_names <- c("run", "gsm_name", "title", "organism_ch1", "library_layout", "series_id", "gene")
+
+# Loop through each sublist in metadata
+for (i in seq_along(metadata)) {
+  sublist <- metadata[[i]]  # Get the current sublist
+  
+  # Loop through each element in the sublist
+  for (name in names(sublist)) {
+    # Check if the current element's name is not in the selected names
+    if (!(name %in% selected_names)) {
+      # If it's not in the selected names, remove it from the sublist
+      sublist[[name]] <- NULL
+    }
+  }
+  
+  # Update the sublist back into metadata
+  metadata[[i]] <- sublist
+}
+```
+
+How many genes at this point:
+```{r}
+# Initialize an empty vector to store the genes
+Gene_number_bfilt <- c()
+
+# Loop through each dataframe in the metadata list
+for (i in seq_along(metadata)) {
+  # Append the first gene value of the current dataframe to the vector
+  Gene_number_bfilt <- c(Gene_number_bfilt, metadata[[i]]$gene[1])
+}
+
+# Ensure the gene values are unique
+Gene_number_bfilt <- unique(Gene_number_bfilt)
+
+
+
+```
+
+
+```{r}
+# Initialize an empty vector to collect all gene names
+all_genes <- character()
+
+# Loop through each data frame in the list
+for (df in metadata) {
+  # Extract the 'Gene' column and append to the vector
+  all_genes <- c(all_genes, df$gene[1])
+}
+
+# Count occurrences of each unique gene
+gene_counts <- table(all_genes)
+
+# Convert the table to a data frame for better readability
+gene_counts_df <- as.data.frame(gene_counts)
+colnames(gene_counts_df) <- c("Gene", "Count")
+
+# Reorder the dataframe by 'Count' in descending order
+gene_counts_df <- gene_counts_df[order(-gene_counts_df$Count), ]
+
+
+
+```
+
+```{r}
+metadata_GPT<-metadata
+
+# Add GPT3.5 and GPT4 columns to matching dataframes in the list
+for (i in seq_along(metadata_GPT)) {
+  df_name <- names(metadata_GPT)[i]
+  
+  # Check if df_name is in diff_table2$updatedframename
+  match_idx <- which(diff_table2$updatedframename == df_name)
+  
+  if (length(match_idx) > 0) {
+    # Extract the GPT3.5 and GPT4 values for the matching dataframe
+    gpt3.5_value <- diff_table2$GPT3.5[match_idx][1]
+    gpt4_value <- diff_table2$GPT4[match_idx][1]
+    
+    # Get the number of rows in the current dataframe
+    n_rows <- nrow(metadata_GPT[[i]])
+    
+    # Repeat the GPT3.5 and GPT4 values to match the number of rows in the dataframe
+    metadata_GPT[[i]]$GPT3.5 <- rep(gpt3.5_value, n_rows)
+    metadata_GPT[[i]]$GPT4 <- rep(gpt4_value, n_rows)
+  }
+}
+
+
+
+```
+
+```{r}
+
+# Initialize a vector to store the names of dataframes with the column GPT4
+dataframes_with_GPT <- c()
+
+# Iterate through each dataframe in the list
+for (i in seq_along(metadata_GPT)) {
+  # Check if the dataframe contains the column GPT4
+  if ("GPT4" %in% colnames(metadata_GPT[[i]])) {
+    # Store the name of the dataframe
+    dataframes_with_GPT <- c(dataframes_with_GPT, names(metadata_GPT)[i])
+  }
+}
+```
+
+
+
+
+###
+```{r}
+# metadata contains our SRRs, now lets get our necessary information to construct our file path. The get_dldir fetches our path and lets make a new column called path that stores this information.
+
+# Loop through each list in metadata
+for (i in seq_along(metadata)) {
+  # Initialize a new_column as an empty character vector
+  metadata[[i]]$path <- character(length = length(metadata[[i]][[1]]))
+  
+  # Loop through each element in the sublist
+  for (j in seq_along(metadata[[i]][[1]])) {
+    result <- get_dldir(metadata[[i]][[1]][[j]], type = c("ebi", "ncbi"))
+    metadata[[i]]$path[j] <- result
+  }
+}
+
+
+#now we need to double the last /SRR to the original strings, this is how the file path is formatted for some reason.
+
+for (i in seq_along(metadata)) {
+  original_strings <- metadata[[i]]$path
+  new_strings <- vector("character", length(original_strings))
+  
+  for (j in seq_along(original_strings)) {
+    new_strings[j] <- paste0(original_strings[j], "/", sub("^.+/", "", original_strings[j]))
+  }
+  
+  metadata[[i]]$path <- new_strings
+}
+
+
+#now we want to complete the file path
+
+# Loop through each list in metadata
+for (i in seq_along(metadata)) {
+  # Initialize a new_column as an empty character vector
+  original_string <- metadata[[i]]$path
+  new_strings <- character(length(original_string))
+  
+  # Loop through each element in the sublist
+  for (j in seq_along(original_string)) {
+    new_strings[j] <- paste("ftp://ftp.sra.ebi.ac.uk/vol1/fastq/", original_string[j], ".fastq.gz", sep = "")
+  }
+  metadata[[i]]$path <- new_strings
+}
+
+
+```
+#####
+
+
+For GPT series excel
+
+```{r}
+GPT_metadata<-dataframes_with_GPT
+
+df<- data.frame(GSE=GPT_metadata)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GPT_metadata_summer.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE) 
+```
+
+
+
+
+Now we create an excel file to manually go over all of the samples within each series
+```{r}
+GSE_metadata<-names(metadata_GPT)
+
+df<- data.frame(GSE=GSE_metadata)
+
+# Define the file path where you want to save the Excel file
+file_path <- "GSE_metadata_summer.xlsx"
+
+# Write the data frame to an Excel file
+write.xlsx(df, file_path, rowNames = FALSE) 
+
+```
+
+```{r}
+# Create a new workbook
+wb <- createWorkbook()
+
+# Loop through the list and add each dataframe to a new sheet
+for (name in names(metadata_GPT)) {
+  addWorksheet(wb, name)
+  writeData(wb, sheet = name, metadata_GPT[[name]])
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "meta_data_summer_input.xlsx", overwrite = TRUE)
+
+print("Data has been written to multiple sheets in an Excel file.")
+
+```
+
+We need to add a column called condition and treatment
+```{r}
+# Loop through each dataframe in the list and add the condition column with NA values
+for (name in names(metadata_GPT)) {
+  df <- metadata_GPT[[name]]
+  
+  # Add the condition column with NA values
+  df$condition <- NA
+  # Add the treatment column with NA values
+  df$treatment <- NA
+  
+  # Update the list with the modified dataframe
+  metadata_GPT[[name]] <- df
+}
+
+
+
+```
+
+
+
+
+
+Split our files into 5 parts
+```{r}
+# Number of workbooks to create
+num_workbooks <- 5
+
+# Calculate the number of dataframes per workbook
+num_dataframes <- length(metadata_GPT)
+dataframes_per_workbook <- ceiling(num_dataframes / num_workbooks)
+
+# Split the list of dataframes into subsets
+dataframe_splits <- split(metadata_GPT, ceiling(seq_along(metadata_GPT) / dataframes_per_workbook))
+
+# Create and save each workbook
+for (i in seq_along(dataframe_splits)) {
+  # Create a new workbook
+  wb <- createWorkbook()
+  
+  # Get the current subset of dataframes
+  current_dataframes <- dataframe_splits[[i]]
+  
+  # Loop through the subset and add each dataframe to a new sheet
+  for (name in names(current_dataframes)) {
+    addWorksheet(wb, name)
+    writeData(wb, sheet = name, current_dataframes[[name]])
+  }
+  
+  # Define the file path for the current workbook
+  file_path <- paste0("meta_data_summer_input_part_", i, ".xlsx")
+  
+  # Save the workbook to a file
+  saveWorkbook(wb, file_path, overwrite = TRUE)
+  
+  print(paste("Workbook", i, "has been saved to", file_path))
+}
+
+print("All data has been written to separate Excel files.")
+```
+
+NOW WE NEED TO COMBINE ALIAS INTO ONE GENE AND REMOVE POTENTIAL DUPLICATES (SHOULD DO THIS SOONER)!!!
+
+```{r}
+# Define the paths to your Excel workbooks
+workbook_paths <- c("meta_data_summer_input_part_4_output.xlsx",
+                    "meta_data_summer_input_part_5_output.xlsx")
+
+# Function to read all sheets from a single workbook
+read_all_sheets <- function(file_path) {
+  sheet_names <- excel_sheets(file_path)
+  sheets_list <- lapply(sheet_names, function(sheet) {
+    read_excel(file_path, sheet = sheet)
+  })
+  names(sheets_list) <- sheet_names
+  return(sheets_list)
+}
+
+# Read all workbooks and combine them into one list
+all_sheets_list <- lapply(workbook_paths, read_all_sheets)
+
+# Combine the lists from each workbook into one list
+combined_sheets_list <- do.call(c, all_sheets_list)
+```
+
+
+Any missing conditions from any dataset?
+```{r}
+# Function to check for empty values in the 'condition' column
+check_empty_condition <- function(dataset) {
+  if("condition" %in% colnames(dataset)) {
+    return(any(is.na(dataset$condition) | dataset$condition == ""))
+  } else {
+    return(NA)  # If the column doesn't exist, return NA
+  }
+}
+
+# Apply the function to each dataset in the combined list
+empty_condition_check <- lapply(combined_sheets_list, check_empty_condition)
+
+# Display the results
+empty_condition_check
+
+# Identify datasets with empty 'condition' column values
+datasets_with_empty_condition <- names(empty_condition_check)[unlist(empty_condition_check)]
+
+# Display names of datasets with empty values in 'condition'
+datasets_with_empty_condition
+```
+
+Combine all original gene names and alias into a list of data frames that stores the original gene names along side their alias
+```{r}
+# Assuming Gene_names is your original list of dataframes
+# and Errors is the list with gene names as character vectors
+
+Gene_names <- Terms
+
+# Iterate through each gene name in the Errors list
+for (gene_name in Errors) {
+  
+  # Create a new dataframe with the gene name in both SYMBOL and ALIAS columns
+  new_df <- data.frame(SYMBOL = gene_name, ALIAS = gene_name, stringsAsFactors = FALSE)
+  
+  # Check if the gene_name exists in the Gene_names list
+  if (gene_name %in% names(Gene_names)) {
+    # If it exists, print a message or add the dataframe to the existing one
+    print(paste(gene_name, "already exists"))
+  } else {
+    # If it doesn't exist, create a new entry in the list
+    Gene_names[[gene_name]] <- new_df
+  }
+}
+
+# The Gene_names list now contains updated dataframes with the new gene information added
+
+```
+
+```{r}
+# Iterate over each dataframe in the metadata_output1_3 list
+metadata_output4_5<- combined_sheets_list
+
+for (i in seq_along(metadata_output4_5)) {
+  # Get the current dataframe
+  df <- metadata_output4_5[[i]]
+  
+  # Iterate over each row in the dataframe
+  for (j in seq_len(nrow(df))) {
+    # Extract the gene name from the 'gene' column, removing " RNA-seq"
+    gene_name <- gsub(" RNA-seq", "", df$gene[j])
+    
+    # Flag to indicate if a match was found
+    found_match <- FALSE
+    
+    # Iterate over each dataframe in the Gene_names list to find the alias
+    for (k in seq_along(Gene_names)) {
+      gene_data <- Gene_names[[k]]
+      
+      # Check if the gene_name exists in the ALIAS column
+      if (gene_name %in% gene_data$ALIAS) {
+        # If found, replace the 'gene' column value with the corresponding SYMBOL followed by " RNA-seq"
+        df$gene[j] <- paste0(gene_data$SYMBOL[gene_data$ALIAS == gene_name], " RNA-seq")
+        found_match <- TRUE
+        break  # Exit the loop since we found the match
+      }
+    }
+    
+    # Optionally, handle the case where no match is found (if needed)
+    if (!found_match) {
+      # Code to handle no match found (if necessary)
+    }
+  }
+  
+  # Update the original dataframe in the list
+  metadata_output4_5[[i]] <- df
+}
+
+# The metadata_output1_3 list now contains updated dataframes
+
+```
+
+```{r}
+# Initialize a list to store the differences
+difference_results <- list()
+
+# Iterate over each dataset in metadata_output1_3
+for (i in seq_along(metadata_output4_5)) {
+  # Get the current dataset's name
+  dataset_name <- names(metadata_output4_5)[i]
+  
+  # Check if the same dataset exists in combined_sheets_list
+  if (dataset_name %in% names(combined_sheets_list)) {
+    # Get the datasets from both lists
+    updated_df <- metadata_output4_5[[dataset_name]]
+    original_df <- combined_sheets_list[[dataset_name]]
+    
+    # Ensure both datasets have a 'gene' column
+    if ("gene" %in% colnames(updated_df) && "gene" %in% colnames(original_df)) {
+      # Find the differences in the 'gene' columns
+      diff_indices <- which(original_df$gene != updated_df$gene)
+      
+      # If there are differences, store them
+      if (length(diff_indices) > 0) {
+        # Create a dataframe to store the differences
+        difference_df <- data.frame(
+          original_gene = original_df$gene[diff_indices],
+          updated_gene = updated_df$gene[diff_indices],
+          row_number = diff_indices,
+          stringsAsFactors = FALSE
+        )
+        
+        # Store the differences in the results list
+        difference_results[[dataset_name]] <- difference_df
+      }
+    }
+  }
+}
+
+# Display the differences results
+difference_results
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Combine all dataframes into a single dataframe with an added 'source' column to track origin
+combined_df <- bind_rows(metadata_output4_5, .id = "source")
+
+# Identify duplicates based on 'series_id' and 'gene'
+duplicates_df <- combined_df %>%
+  group_by(series_id, gene) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+# Identify which dataframes have these duplicates
+duplicates_summary <- duplicates_df %>%
+  group_by(series_id, gene, source) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(series_id, gene) %>%
+  summarise(dataframes = paste(source, collapse = ", "), .groups = 'drop') %>%
+  arrange(series_id, gene)
+
+# Display the summary table showing which dataframes have duplicates
+duplicates_summary
+
+
+
+```
+
+
+
+
+
+
+```{r}
+library(dplyr)
+
+# Combine all dataframes into a single dataframe
+combined_df <- bind_rows(metadata_output4_5, .id = "source")
+
+# Remove duplicate rows based on 'series_id' and 'gene', keeping only the first occurrence
+unique_df <- combined_df %>%
+  distinct(series_id, gene, .keep_all = TRUE)
+
+# Split the combined dataframe back into a list of dataframes based on the 'source' column
+unique_dfs <- split(unique_df, unique_df$source)
+
+# If you don't need the 'source' column anymore, remove it
+unique_dfs <- lapply(unique_dfs, function(df) {
+  df %>% select(-source)
+})
+
+# Display the unique dataframes list
+unique_dfs
+
+```
+
+Now only unique combinations of same serie and same gene
+```{r}
+# Get the names of dataframes in unique_dfs
+unique_names <- names(unique_dfs)
+
+# Filter metadata_output1_3 to keep only dataframes with names in unique_names
+filtered_metadata_output4_5 <- metadata_output4_5[names(metadata_output4_5) %in% unique_names]
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+Let's write our txt file: based on mouse single, mouse paired, human single and human paired
+
+```{r}
+write_links <- function(links_list, file_path) {
+  mouse_single <- character()
+  mouse_paired <- character()
+  human_single <- character()
+  human_paired <- character()
+
+  for (i in seq_along(links_list)) {
+    item <- links_list[[i]]
+   
+    for (j in seq_along(item[["organism_ch1"]])) { # Loop through the elements of 'organism_ch1'
+      organism <- item[["organism_ch1"]][[j]]
+      layout <- item[["library_layout"]][[j]]
+      path <- item[["run"]][[j]]
+        
+      if (!is.null(organism) && !is.null(layout)) { # Check inside the loop
+        if (organism == "Mus musculus") {
+          if (layout == "SINGLE") {
+            mouse_single <- c(mouse_single, path)
+          } else {
+            mouse_paired <- c(mouse_paired, path)
+          }
+        } else {
+          if (layout == "SINGLE") {
+            human_single <- c(human_single, path)
+          } else {
+            human_paired <- c(human_paired, path)
+          }
+        }
+      }
+    }
+  }
+
+  file_conn <- file(file_path, open = "w")
+
+  writeLines("Mouse Single Transcripts", file_conn)
+  writeLines(mouse_single, file_conn)
+
+  writeLines("Mouse Paired Transcripts", file_conn)
+  writeLines(mouse_paired, file_conn)
+
+  writeLines("Human Single Transcripts", file_conn)
+  writeLines(human_single, file_conn)
+
+  writeLines("Human Paired Transcripts", file_conn)
+  writeLines(human_paired, file_conn)
+
+  close(file_conn)
+}
+
+
+
+write_links(filtered_metadata_output4_5, "FASTAQ_paths_4_5.txt")
+
+```
+
+Combine our metadata into one
+```{r}
+metadata_combined<-c(filtered_metadata_output1_3,filtered_metadata_output4_5)
+```
+
+```{r}
+# Load the openxlsx package
+library(openxlsx)
+
+# Save metadata_combined to an Excel file
+write.xlsx(metadata_combined, "metadata_combined.xlsx")
+```
+
+

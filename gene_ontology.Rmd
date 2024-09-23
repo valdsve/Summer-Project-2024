@@ -1,0 +1,90 @@
+---
+title: "gene_ontology"
+author: "Valdimar"
+date: "2024-09-16"
+output: html_document
+---
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("clusterProfiler")
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("AnnotationDbi")
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("org.Hs.eg.db")
+```
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(biomaRt)
+```
+
+```{r}
+# Connect to Ensembl
+ensembl <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+```
+
+```{r}
+# Retrieve Ensembl IDs
+ensembl_ids_all <- getBM(attributes = c("external_gene_name", "ensembl_gene_id"),
+                     filters = "external_gene_name",
+                     values = Genes,
+                     mart = ensembl)
+```
+
+
+```{r}
+GO_results <- enrichGO(gene = ensembl_ids_all$ensembl_gene_id, OrgDb = "org.Hs.eg.db", keyType = "ENSEMBL", ont = "BP")
+```
+
+```{r}
+as.data.frame(GO_results)
+```
+
+```{r}
+fit <- plot(barplot(GO_results, showCategory = 15))
+
+png("out.png", res = 250, width = 1400, height = 1800)
+print(fit)
+dev.off()
+
+fit
+```
+```{r}
+# Retrieve Ensembl IDs
+ensembl_ids_4_2 <- getBM(attributes = c("external_gene_name", "ensembl_gene_id"),
+                     filters = "external_gene_name",
+                     values = filtered_results$RowName[1:21],
+                     mart = ensembl)
+```
+
+
+```{r}
+GO_results_4_2 <- enrichGO(gene = ensembl_ids_4_2$ensembl_gene_id, OrgDb = "org.Hs.eg.db", keyType = "ENSEMBL", ont = "BP")
+```
+
+```{r}
+as.data.frame(GO_results_4_2)
+```
+
+```{r}
+fit <- plot(barplot(GO_results_4_2, showCategory = 15))
+
+png("out_4_2.png", res = 250, width = 1400, height = 1800)
+print(fit)
+dev.off()
+
+fit
+```
+
